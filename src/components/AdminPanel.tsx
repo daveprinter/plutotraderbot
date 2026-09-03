@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Ban, Copy, History, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Ban, Copy, History, Plus, RefreshCw, Settings, ShieldCheck, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,16 +24,199 @@ import {
 import { cn } from "@/lib/utils";
 import {
   adminGenerateLicense,
+  adminGetSettings,
   adminLicenseAction,
   adminLicenseHistory,
   adminListLicenses,
   adminResendCode,
   adminStart,
+  adminUpdateSettings,
   adminVerify,
   type AdminLicenseRow,
+  type AdminSettings,
+  type EmailDelivery,
 } from "@/lib/admin.functions";
 
 type Step = "code" | "verify" | "panel";
+
+function AdminSettingsCard({ token }: { token: string }) {
+  const [open, setOpen] = useState(false);
+  const [saved, setSaved] = useState<AdminSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminCode, setAdminCode] = useState("");
+  const [fallbackCode, setFallbackCode] = useState("");
+  const [delivery, setDelivery] = useState<EmailDelivery>("resend");
+  const [resendApiKey, setResendApiKey] = useState("");
+
+  useEffect(() => {
+    if (!open || saved) return;
+    adminGetSettings({ data: { token } })
+      .then((s) => {
+        setSaved(s);
+        setAdminEmail(s.adminEmail);
+        setAdminCode(s.adminCode);
+        setFallbackCode(s.fallbackCode);
+        setDelivery(s.delivery);
+      })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "Could not load settings"));
+  }, [open, saved, token]);
+
+  const emailChanged =
+    !!saved && adminEmail.trim().toLowerCase() !== saved.resendOwnerEmail.toLowerCase();
+  const needsChoice = emailChanged && delivery === "resend" && !resendApiKey;
+
+  const save = async () => {
+    if (needsChoice) {
+      toast.error("Pick how codes should reach the new email, or add a Resend key from that email's account.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await adminUpdateSettings({
+        data: {
+          token,
+          adminEmail,
+          adminCode,
+          fallbackCode,
+          delivery,
+          resendApiKey,
+          resendOwnerEmail: resendApiKey ? adminEmail : saved?.resendOwnerEmail,
+        },
+      });
+      if (!res.ok) {
+        toast.error(res.message);
+        return;
+      }
+      toast.success(res.message);
+      setResendApiKey("");
+      setSaved(null); // reload
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not save settings");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="p-3">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between text-left"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span className="flex items-center gap-2 text-sm font-semibold">
+          <Settings className="h-4 w-4 text-primary" /> Admin login & email settings
+        </span>
+        <span className="text-xs text-muted-foreground">{open ? "Hide" : "Change email, codes, Resend key"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-4">
+          <Separator />
+          {!saved ? (
+            <p className="text-xs text-muted-foreground">Loading settings…</p>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="set-admin-code">Admin panel code</Label>
+                  <Input
+                    id="set-admin-code"
+                    inputMode="numeric"
+                    value={adminCode}
+                    onChange={(e) => setAdminCode(e.target.value.replace(/\D/g, ""))}
+                    placeholder="0000"
+                  />
+                  <p className="text-[11px] text-muted-foreground">Asked first, before the email code is sent.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="set-fallback-code">Testing verification code</Label>
+                  <Input
+                    id="set-fallback-code"
+                    inputMode="numeric"
+                    value={fallbackCode}
+                    onChange={(e) => setFallbackCode(e.target.value.replace(/\D/g, ""))}
+                    placeholder="Leave empty to disable"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Always accepted instead of the emailed code. Clear it for production.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="set-admin-email">Admin email (receives login codes)</Label>
+                <Input
+                  id="set-admin-email"
+                  type="email"
+                  value={adminEmail}
+                  onChange={(e) => setAdminEmail(e.target.value)}
+                  placeholder="admin@example.com"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Current Resend key delivers to <span className="font-medium">{saved.resendOwnerEmail}</span>
+                  {saved.resendKeyPreview ? ` (key ${saved.resendKeyPreview})` : " (no key saved)"}.
+                </p>
+              </div>
+
+              {emailChanged && (
+                <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-3">
+                  <p className="text-xs">
+                    <span className="font-semibold">New email detected.</span> Resend only delivers to the email that
+                    owns its API key, so choose how codes should reach{" "}
+                    <span className="font-medium">{adminEmail || "the new address"}</span>:
+                  </p>
+                  <Select value={delivery} onValueChange={(v) => setDelivery(v as EmailDelivery)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="resend">Resend.com — add a key from the new email's Resend account</SelectItem>
+                      <SelectItem value="lovable">Lovable Emails — send to the new email</SelectItem>
+                      <SelectItem value="both">Both — Resend to {saved.resendOwnerEmail}, Lovable to the new email</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {delivery !== "resend" && !saved.lovableEmailReady && (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                      Lovable Emails is not activated for this project yet. Ask Lovable to set up the email domain
+                      first; until then codes to the new email will not be delivered
+                      {delivery === "both" ? ` (the copy to ${saved.resendOwnerEmail} still sends)` : ""}.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="set-resend-key">
+                  New Resend.com API token {emailChanged && delivery === "resend" ? "(required)" : "(optional)"}
+                </Label>
+                <Input
+                  id="set-resend-key"
+                  type="password"
+                  autoComplete="off"
+                  value={resendApiKey}
+                  onChange={(e) => setResendApiKey(e.target.value.trim())}
+                  placeholder="re_…"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Paste a token created in the Resend account of{" "}
+                  <span className="font-medium">{adminEmail || "the admin email"}</span>. It is validated with Resend and
+                  replaces the current key; the admin email becomes the delivery address.
+                </p>
+              </div>
+
+              <Button onClick={save} disabled={busy} className="w-full sm:w-auto">
+                {busy ? "Updating…" : "Update settings"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
 
 export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const [step, setStep] = useState<Step>("code");
