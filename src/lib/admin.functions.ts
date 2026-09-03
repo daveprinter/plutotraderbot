@@ -331,6 +331,18 @@ export const adminLicenseAction = createServerFn({ method: "POST" })
         detail: message,
       });
     }
+
+    // Push the change to any device currently running this license so it
+    // reacts instantly instead of waiting for the next heartbeat.
+    try {
+      await supabaseAdmin.channel(`license:${license.code}`).send({
+        type: "broadcast",
+        event: "status",
+        payload: { action: data.action },
+      });
+    } catch (e) {
+      console.error("License broadcast failed", e);
+    }
     return { ok: true, message };
   });
 
