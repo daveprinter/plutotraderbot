@@ -410,27 +410,104 @@ export const adminLicenseHistory = createServerFn({ method: "POST" })
     return events ?? [];
   });
 
-export const adminGetEmail = createServerFn({ method: "POST" })
+export type AdminSettings = {
+  adminEmail: string;
+  adminCode: string;
+  fallbackCode: string;
+  delivery: EmailDelivery;
+  resendOwnerEmail: string;
+  /** Masked preview of the active Resend key (never the full key). */
+  resendKeyPreview: string | null;
+  lovableEmailReady: boolean;
+};
+
+function maskKey(key: string | null) {
+  if (!key) return null;
+  return `${key.slice(0, 6)}${"•".repeat(8)}${key.slice(-4)}`;
+}
+
+export const adminGetSettings = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => ({ token: String((input as { token?: string })?.token ?? "") }))
-  .handler(async ({ data }) => {
+  .handler(async ({ data }): Promise<AdminSettings> => {
     const supabaseAdmin = await requireAdmin(data.token);
-    const { data: row } = await supabaseAdmin
-      .from("app_settings")
-      .select("value")
-      .eq("key", "admin_email")
-      .maybeSingle();
-    return { email: row?.value ?? "" };
+    const cfg = await loadConfig(supabaseAdmin);
+    return {
+      adminEmail: cfg.adminEmail,
+      adminCode: cfg.adminCode,
+      fallbackCode: cfg.fallbackCode ?? "",
+      delivery: cfg.delivery,
+      resendOwnerEmail: cfg.resendOwnerEmail,
+      resendKeyPreview: maskKey(cfg.resendKey),
+      lovableEmailReady: false,
+    };
   });
 
-export const adminSetEmail = createServerFn({ method: "POST" })
-  .inputValidator((input: unknown) => {
-    const v = input as { token?: string; email?: string };
-    return { token: String(v?.token ?? ""), email: String(v?.email ?? "").trim() };
-  })
-  .handler(async ({ data }) => {
-    const supabaseAdmin = await requireAdmin(data.token);
-    await supabaseAdmin
-      .from("app_settings")
-      .upsert({ key: "admin_email", value: data.email, updated_at: new Date().toISOString() });
+/** Checks a Resend key is accepted by Resend (401/403 = invalid). */
+async function verifyResendKey(key: string): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch("https://api.resend.com/domains", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (res.status === 401 || res.status === 403) return { ok: false, message: "Resend rejected this API key." };
     return { ok: true };
+  } catch {
+    return { ok: false, message: "Could not reach Resend to validate the key." };
+  }
+}
+
+export const adminUpdateSettings = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => {
+    const v = input as {
+      token?: string;
+      adminEmail?: string;
+      adminCode?: string;
+      fallbackCode?: string;
+      delivery?: string;
+      resendApiKey?: string;
+      resendOwnerEmail?: string;
+    };
+    const delivery = ["resend", "lovable", "both"].includes(String(v?.delivery)) ? (v!.delivery as EmailDelivery) : "resend";
+    return {
+      token: String(v?.token ?? ""),
+      adminEmail: String(v?.adminEmail ?? "").trim().toLowerCase(),
+      adminCode: String(v?.adminCode ?? "").trim(),
+      fallbackCode: String(v?.fallbackCode ?? "").trim(),
+      delivery,
+      resendApiKey: String(v?.resendApiKey ?? "").trim(),
+      resendOwnerEmail: String(v?.resendOwnerEmail ?? "").trim().toLowerCase(),
+    };
+  })
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.adminEmail)) return { ok: false, message: "Enter a valid admin email." };
+    if (!/^\d{4,8}$/.test(data.adminCode)) return { ok: false, message: "Admin panel code must be 4–8 digits." };
+    if (data.fallbackCode && !/^\d{4,8}$/.test(data.fallbackCode))
+      return { ok: false, message: "Testing verification code must be 4–8 digits (or empty to disable)." };
+    if (data.resendApiKey && !data.resendApiKey.startsWith("re_"))
+      return { ok: false, message: "Resend API keys start with re_." };
+
+    if (data.resendApiKey) {
+      const check = await verifyResendKey(data.resendApiKey);
+      if (!check.ok) return { ok: false, message: check.message ?? "Invalid Resend key." };
+    }
+
+    const now = new Date().toISOString();
+    const rows: { key: string; value: string; updated_at: string }[] = [
+      { key: "admin_email", value: data.adminEmail, updated_at: now },
+      { key: "admin_code", value: data.adminCode, updated_at: now },
+      { key: "fallback_verification_code", value: data.fallbackCode, updated_at: now },
+      { key: "email_delivery", value: data.delivery, updated_at: now },
+    ];
+    if (data.resendApiKey) {
+      rows.push({ key: "resend_api_key", value: data.resendApiKey, updated_at: now });
+      // A fresh key belongs to the account of the (new) admin email unless told otherwise.
+      rows.push({ key: "resend_owner_email", value: data.resendOwnerEmail || data.adminEmail, updated_at: now });
+    } else if (data.resendOwnerEmail) {
+      rows.push({ key: "resend_owner_email", value: data.resendOwnerEmail, updated_at: now });
+    }
+
+    const { error } = await supabaseAdmin.from("app_settings").upsert(rows, { onConflict: "key" });
+    if (error) return { ok: false, message: error.message };
+    return { ok: true, message: "Admin settings updated. They apply to the next login." };
   });
