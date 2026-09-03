@@ -77,8 +77,10 @@ export const activateLicense = createServerFn({ method: "POST" })
 
     const existing = (devices ?? []).find((d) => d.device_hash === data.deviceHash);
 
+    const unlimited = license.max_activations <= 0;
+
     if (!existing) {
-      if ((devices ?? []).length >= license.max_activations) {
+      if (!unlimited && (devices ?? []).length >= license.max_activations) {
         await log("device_blocked", "Another device is already registered");
         return {
           ok: false,
