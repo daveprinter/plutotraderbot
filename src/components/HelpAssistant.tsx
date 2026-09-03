@@ -109,12 +109,14 @@ export function HelpAssistant() {
         </Card>
       )}
       <Button
-        size="icon"
-        aria-label="Help assistant"
+        size="lg"
+        aria-label="Help & support"
+        title="Help & support"
         onClick={() => setOpen((v) => !v)}
-        className={cn("fixed bottom-6 right-4 z-50 h-14 w-14 rounded-full shadow-lg")}
+        className={cn("fixed bottom-6 right-4 z-50 h-14 gap-2 rounded-full px-5 shadow-lg")}
       >
         <LifeBuoy className="h-6 w-6" />
+        <span className="text-sm font-semibold">{open ? "Close" : "Help"}</span>
       </Button>
     </>
   );
