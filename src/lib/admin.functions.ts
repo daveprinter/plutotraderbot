@@ -199,11 +199,10 @@ export const adminResendCode = createServerFn({ method: "POST" })
       .update({ verification_code: verification, created_at: new Date().toISOString() })
       .eq("id", session.id);
 
-    const email = await adminEmail(supabaseAdmin);
-    const sent = await sendVerificationEmail(email, verification);
-    return sent
-      ? { ok: true, message: `A new code was sent to ${maskEmail(email)}. It expires in 5 minutes.` }
-      : { ok: false, message: "Could not send the verification email. Try again shortly." };
+    const reached = await sendVerificationEmail(await loadConfig(supabaseAdmin), verification);
+    return reached.length
+      ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 5 minutes.` }
+      : { ok: false, message: "Could not send the verification email. Check email settings or try again shortly." };
   });
 
 /** Step 2 — email verification code (must be used within 5 minutes of being sent). */
