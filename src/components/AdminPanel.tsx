@@ -517,7 +517,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
                       </td>
                       <td className="p-2">{fmt(l.expires_at)}</td>
                       <td className="p-2">
-                        {l.devices.length} / {l.max_activations}
+                        {l.devices.length} / {l.max_activations <= 0 ? "∞" : l.max_activations}
                       </td>
                       <td className="p-2">
                         <div className="flex flex-wrap gap-1">
