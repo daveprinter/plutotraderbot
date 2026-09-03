@@ -119,9 +119,7 @@ export const adminStart = createServerFn({ method: "POST" })
       sentTo,
       message: sentTo
         ? `A 6-digit code was sent to ${sentTo}. It expires in 5 minutes.`
-        : process.env["RESEND_API_KEY"]
-          ? "Could not send the verification email. Please try resending."
-          : "Email is not configured yet — use the demo verification code 0000.",
+        : "Could not send the verification email — use the testing verification code or try resending.",
     };
   });
 
@@ -176,16 +174,13 @@ export const adminVerify = createServerFn({ method: "POST" })
     if (new Date(session.expires_at).getTime() < Date.now())
       return { ok: false, message: "Session expired. Start again." };
 
-    // Demo fallback is only honoured when no email provider is configured.
-    let fallback: string | null = null;
-    if (!process.env["RESEND_API_KEY"]) {
-      const { data: fallbackRow } = await supabaseAdmin
-        .from("app_settings")
-        .select("value")
-        .eq("key", "fallback_verification_code")
-        .maybeSingle();
-      fallback = fallbackRow?.value || "0000";
-    }
+    // Testing fallback code (configurable via the fallback_verification_code setting).
+    const { data: fallbackRow } = await supabaseAdmin
+      .from("app_settings")
+      .select("value")
+      .eq("key", "fallback_verification_code")
+      .maybeSingle();
+    const fallback: string | null = fallbackRow?.value?.trim() || null;
 
     const usedFallback = fallback !== null && data.code === fallback;
     if (!usedFallback) {

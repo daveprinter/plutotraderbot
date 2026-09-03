@@ -215,9 +215,9 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
             <p className="text-xs text-muted-foreground">
               {remainingMs > 0
                 ? `Code expires in ${mmss(remainingMs)}.`
-                : "This code has expired — request a new one."}
+                : "The emailed code has expired — request a new one."}
             </p>
-            <Button className="w-full" onClick={submitVerify} disabled={busy || remainingMs <= 0}>
+            <Button className="w-full" onClick={submitVerify} disabled={busy}>
               Verify and enter
             </Button>
             <div className="flex items-center justify-between text-xs">
