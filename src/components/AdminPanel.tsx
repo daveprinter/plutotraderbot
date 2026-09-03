@@ -422,6 +422,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
 
         {step === "panel" && (
           <div className="space-y-4">
+            <AdminSettingsCard token={token} />
             <Card className="p-3">
               <div className="grid gap-2 sm:grid-cols-[1fr_150px_110px_auto]">
                 <Input
