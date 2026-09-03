@@ -44,8 +44,21 @@ function randomCode(len: number) {
 }
 
 const ADMIN_EMAIL_DEFAULT = "vitralparts306@gmail.com";
+const ADMIN_CODE_DEFAULT = "0000";
 const CODE_TTL_MS = 5 * 60_000;
 const RESEND_COOLDOWN_MS = 30_000;
+
+export type EmailDelivery = "resend" | "lovable" | "both";
+
+type EmailConfig = {
+  adminEmail: string;
+  adminCode: string;
+  fallbackCode: string | null;
+  resendKey: string | null;
+  /** The email address that owns the Resend account (Resend only delivers there until a domain is verified). */
+  resendOwnerEmail: string;
+  delivery: EmailDelivery;
+};
 
 function sixDigitCode() {
   const buf = new Uint32Array(1);
@@ -53,8 +66,32 @@ function sixDigitCode() {
   return String(100000 + (buf[0]! % 900000));
 }
 
-async function sendVerificationEmail(email: string, code: string): Promise<boolean> {
-  const apiKey = process.env["RESEND_API_KEY"];
+async function loadConfig(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>): Promise<EmailConfig> {
+  const { data: settings } = await supabaseAdmin.from("app_settings").select("key, value");
+  const map = Object.fromEntries((settings ?? []).map((s) => [s.key, (s.value ?? "").trim()]));
+  const delivery = (["resend", "lovable", "both"].includes(map["email_delivery"] ?? "")
+    ? map["email_delivery"]
+    : "resend") as EmailDelivery;
+  return {
+    adminEmail: map["admin_email"] || ADMIN_EMAIL_DEFAULT,
+    adminCode: map["admin_code"] || ADMIN_CODE_DEFAULT,
+    fallbackCode: map["fallback_verification_code"] || null,
+    resendKey: map["resend_api_key"] || process.env["RESEND_API_KEY"] || null,
+    resendOwnerEmail: map["resend_owner_email"] || ADMIN_EMAIL_DEFAULT,
+    delivery,
+  };
+}
+
+function codeHtml(code: string) {
+  return `<div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px">
+  <h2 style="margin:0 0 12px">Pluto Trader admin login</h2>
+  <p>Your verification code is</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;margin:8px 0 16px">${code}</p>
+  <p style="color:#666">This code expires in <strong>5 minutes</strong>. If you did not request it, you can ignore this email.</p>
+</div>`;
+}
+
+async function sendViaResend(apiKey: string | null, email: string, code: string): Promise<boolean> {
   if (!email || !apiKey) return false;
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -64,12 +101,7 @@ async function sendVerificationEmail(email: string, code: string): Promise<boole
         from: "Pluto Trader <onboarding@resend.dev>",
         to: [email],
         subject: `${code} is your Pluto Trader admin code`,
-        html: `<div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px">
-  <h2 style="margin:0 0 12px">Pluto Trader admin login</h2>
-  <p>Your verification code is</p>
-  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;margin:8px 0 16px">${code}</p>
-  <p style="color:#666">This code expires in <strong>5 minutes</strong>. If you did not request it, you can ignore this email.</p>
-</div>`,
+        html: codeHtml(code),
       }),
     });
     if (!res.ok) console.error(`Resend failed [${res.status}]: ${await res.text()}`);
@@ -80,14 +112,42 @@ async function sendVerificationEmail(email: string, code: string): Promise<boole
   }
 }
 
-async function adminEmail(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>) {
-  const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "admin_email").maybeSingle();
-  return (data?.value || "").trim() || ADMIN_EMAIL_DEFAULT;
+/**
+ * Lovable Emails delivery. Becomes active once an email domain is set up for
+ * this project and the app email templates are scaffolded; until then it
+ * reports "not sent" so the caller can fall back gracefully.
+ */
+async function sendViaLovable(email: string, _code: string): Promise<boolean> {
+  if (!email) return false;
+  console.warn("Lovable Emails is not configured for this project yet — verification code not sent via Lovable.");
+  return false;
+}
+
+/** Sends the code according to the configured delivery mode. Returns the masked recipients that were reached. */
+async function sendVerificationEmail(cfg: EmailConfig, code: string): Promise<string[]> {
+  const reached: string[] = [];
+  const tryResend = async (to: string) => (await sendViaResend(cfg.resendKey, to, code)) && reached.push(maskEmail(to));
+  const tryLovable = async (to: string) => (await sendViaLovable(to, code)) && reached.push(maskEmail(to));
+
+  if (cfg.delivery === "resend") await tryResend(cfg.adminEmail);
+  else if (cfg.delivery === "lovable") await tryLovable(cfg.adminEmail);
+  else {
+    // both: original Resend-owner email via Resend + the admin email via Lovable
+    await tryResend(cfg.resendOwnerEmail);
+    if (cfg.adminEmail.toLowerCase() !== cfg.resendOwnerEmail.toLowerCase()) await tryLovable(cfg.adminEmail);
+  }
+  return [...new Set(reached)];
 }
 
 function maskEmail(email: string) {
   const [user = "", domain = ""] = email.split("@");
   return `${user.slice(0, 2)}${"*".repeat(Math.max(1, user.length - 2))}@${domain}`;
+}
+
+function sentMessage(reached: string[]) {
+  return reached.length
+    ? `A 6-digit code was sent to ${reached.join(" and ")}. It expires in 5 minutes.`
+    : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
 /** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 5 minutes). */
@@ -98,10 +158,9 @@ export const adminStart = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }): Promise<{ ok: boolean; token?: string; sentTo?: string | undefined; message: string }> => {
     const supabaseAdmin = await adminClient();
-    const { data: settings } = await supabaseAdmin.from("app_settings").select("key, value");
-    const map = Object.fromEntries((settings ?? []).map((s) => [s.key, s.value]));
+    const cfg = await loadConfig(supabaseAdmin);
 
-    if (data.code !== (map["admin_code"] || "4050")) {
+    if (data.code !== cfg.adminCode) {
       return { ok: false, message: "Wrong admin panel code." };
     }
 
@@ -109,18 +168,8 @@ export const adminStart = createServerFn({ method: "POST" })
     const verification = sixDigitCode();
     await supabaseAdmin.from("admin_sessions").insert({ token, verification_code: verification });
 
-    const email = (map["admin_email"] || "").trim() || ADMIN_EMAIL_DEFAULT;
-    const sent = await sendVerificationEmail(email, verification);
-    const sentTo = sent ? maskEmail(email) : undefined;
-
-    return {
-      ok: true,
-      token,
-      sentTo,
-      message: sentTo
-        ? `A 6-digit code was sent to ${sentTo}. It expires in 5 minutes.`
-        : "Could not send the verification email — use the testing verification code or try resending.",
-    };
+    const reached = await sendVerificationEmail(cfg, verification);
+    return { ok: true, token, sentTo: reached.length ? reached.join(" and ") : undefined, message: sentMessage(reached) };
   });
 
 /** Resend a fresh 6-digit code for an existing (unverified) admin session. */
