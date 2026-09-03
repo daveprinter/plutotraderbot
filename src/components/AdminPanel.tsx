@@ -27,6 +27,7 @@ import {
   adminLicenseAction,
   adminLicenseHistory,
   adminListLicenses,
+  adminResendCode,
   adminStart,
   adminVerify,
   type AdminLicenseRow,
@@ -40,6 +41,9 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
   const [verifyCode, setVerifyCode] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sentTo, setSentTo] = useState<string | undefined>();
+  const [codeSentAt, setCodeSentAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [rows, setRows] = useState<AdminLicenseRow[]>([]);
   const [customer, setCustomer] = useState("");
   const [plan, setPlan] = useState("monthly");
@@ -61,6 +65,12 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
   );
 
   useEffect(() => {
+    if (step !== "verify") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [step]);
+
+  useEffect(() => {
     if (step !== "panel" || !token) return;
     const id = setInterval(() => refresh(token), 30_000);
     return () => clearInterval(id);
@@ -75,12 +85,39 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
         return;
       }
       setToken(res.token);
+      setSentTo(res.sentTo);
+      setCodeSentAt(Date.now());
+      setVerifyCode("");
       setStep("verify");
       toast.info(res.message);
     } finally {
       setBusy(false);
     }
   };
+
+  const resendCode = async () => {
+    setBusy(true);
+    try {
+      const res = await adminResendCode({ data: { token } });
+      if (!res.ok) {
+        toast.error(res.message);
+        if (res.message.includes("Start again")) setStep("code");
+        return;
+      }
+      setCodeSentAt(Date.now());
+      setVerifyCode("");
+      toast.success(res.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const CODE_TTL_MS = 5 * 60_000;
+  const RESEND_COOLDOWN_MS = 30_000;
+  const remainingMs = codeSentAt ? Math.max(0, codeSentAt + CODE_TTL_MS - now) : 0;
+  const cooldownMs = codeSentAt ? Math.max(0, codeSentAt + RESEND_COOLDOWN_MS - now) : 0;
+  const mmss = (ms: number) =>
+    `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}`;
 
   const submitVerify = async () => {
     setBusy(true);
@@ -137,7 +174,10 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
           </DialogTitle>
           <DialogDescription>
             {step === "code" && "Enter the admin panel code to continue."}
-            {step === "verify" && "Enter the verification code sent to the admin email."}
+            {step === "verify" &&
+              (sentTo
+                ? `Enter the 6-digit code sent to ${sentTo}.`
+                : "Enter the verification code sent to the admin email.")}
             {step === "panel" && "Generate, activate, suspend, reset and revoke customer licenses."}
           </DialogDescription>
         </DialogHeader>
@@ -165,14 +205,35 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
             <Input
               id="verify-code"
               inputMode="numeric"
+              maxLength={6}
+              autoFocus
               value={verifyCode}
-              onChange={(e) => setVerifyCode(e.target.value)}
+              onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ""))}
               onKeyDown={(e) => e.key === "Enter" && submitVerify()}
-              placeholder="0000"
+              placeholder="123456"
             />
-            <Button className="w-full" onClick={submitVerify} disabled={busy}>
+            <p className="text-xs text-muted-foreground">
+              {remainingMs > 0
+                ? `Code expires in ${mmss(remainingMs)}.`
+                : "This code has expired — request a new one."}
+            </p>
+            <Button className="w-full" onClick={submitVerify} disabled={busy || remainingMs <= 0}>
               Verify and enter
             </Button>
+            <div className="flex items-center justify-between text-xs">
+              <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setStep("code")}>
+                Back
+              </Button>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={resendCode}
+                disabled={busy || cooldownMs > 0}
+              >
+                {cooldownMs > 0 ? `Resend code in ${Math.ceil(cooldownMs / 1000)}s` : "Resend code"}
+              </Button>
+            </div>
           </div>
         )}
 
