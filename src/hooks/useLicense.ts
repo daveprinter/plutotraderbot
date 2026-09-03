@@ -61,21 +61,37 @@ export function useLicense() {
     };
   }, [check]);
 
-  // Live presence heartbeat
+  // Live presence heartbeat + instant push when the admin changes the license
   useEffect(() => {
     if (!state.licensed || !state.code) return;
+    const code = state.code;
     const beat = async () => {
       try {
-        const res = await check(state.code, false);
+        const res = await check(code, false);
         if (!res.ok) {
-          setState((s) => ({ ...s, licensed: false, error: res.message ?? "License is no longer valid." }));
+          if (res.reason !== "device_mismatch") localStorage.removeItem(KEY);
+          setState((s) => ({
+            ...s,
+            licensed: false,
+            info: res.license ?? null,
+            error: res.message ?? "License is no longer valid.",
+          }));
         }
       } catch {
         /* offline — keep working */
       }
     };
-    const id = setInterval(beat, 45_000);
-    return () => clearInterval(id);
+    const id = setInterval(beat, 10_000);
+    const channel = supabase
+      .channel(`license:${code}`)
+      .on("broadcast", { event: "status" }, () => {
+        void beat();
+      })
+      .subscribe();
+    return () => {
+      clearInterval(id);
+      void supabase.removeChannel(channel);
+    };
   }, [state.licensed, state.code, check]);
 
   const activate = useCallback(
