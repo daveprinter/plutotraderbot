@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { activateLicense, licenseHeartbeat, type LicenseCheck } from "@/lib/license.functions";
 import { getDeviceHash, getDeviceName } from "@/lib/device";
+import { supabase } from "@/integrations/supabase/client";
 
 const KEY = "pluto:license-code";
 
