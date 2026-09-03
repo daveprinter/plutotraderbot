@@ -43,7 +43,54 @@ function randomCode(len: number) {
   return out;
 }
 
-/** Step 1 — admin panel code, then a verification code is emailed. */
+const ADMIN_EMAIL_DEFAULT = "vitralparts306@gmail.com";
+const CODE_TTL_MS = 5 * 60_000;
+const RESEND_COOLDOWN_MS = 30_000;
+
+function sixDigitCode() {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return String(100000 + (buf[0]! % 900000));
+}
+
+async function sendVerificationEmail(email: string, code: string): Promise<boolean> {
+  const apiKey = process.env["RESEND_API_KEY"];
+  if (!email || !apiKey) return false;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "Pluto Trader <onboarding@resend.dev>",
+        to: [email],
+        subject: `${code} is your Pluto Trader admin code`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px">
+  <h2 style="margin:0 0 12px">Pluto Trader admin login</h2>
+  <p>Your verification code is</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;margin:8px 0 16px">${code}</p>
+  <p style="color:#666">This code expires in <strong>5 minutes</strong>. If you did not request it, you can ignore this email.</p>
+</div>`,
+      }),
+    });
+    if (!res.ok) console.error(`Resend failed [${res.status}]: ${await res.text()}`);
+    return res.ok;
+  } catch (e) {
+    console.error("Resend request error", e);
+    return false;
+  }
+}
+
+async function adminEmail(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>) {
+  const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "admin_email").maybeSingle();
+  return (data?.value || "").trim() || ADMIN_EMAIL_DEFAULT;
+}
+
+function maskEmail(email: string) {
+  const [user = "", domain = ""] = email.split("@");
+  return `${user.slice(0, 2)}${"*".repeat(Math.max(1, user.length - 2))}@${domain}`;
+}
+
+/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 5 minutes). */
 export const adminStart = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { code?: string };
@@ -59,48 +106,66 @@ export const adminStart = createServerFn({ method: "POST" })
     }
 
     const token = crypto.randomUUID();
-    const verification = String(Math.floor(100000 + Math.random() * 900000));
+    const verification = sixDigitCode();
     await supabaseAdmin.from("admin_sessions").insert({ token, verification_code: verification });
 
-    const email = (map["admin_email"] || "").trim();
-    const apiKey = process.env["RESEND_API_KEY"];
-    let sentTo: string | undefined;
-
-    if (email && apiKey) {
-      try {
-        const res = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            from: "Pluto Trader <onboarding@resend.dev>",
-            to: [email],
-            subject: "Pluto Trader admin verification code",
-            html: `<p>Your admin verification code is <strong style="font-size:20px">${verification}</strong>. It expires in 12 hours.</p>`,
-          }),
-        });
-        if (res.ok) sentTo = email;
-      } catch {
-        /* fall back to the demo code */
-      }
-    }
+    const email = (map["admin_email"] || "").trim() || ADMIN_EMAIL_DEFAULT;
+    const sent = await sendVerificationEmail(email, verification);
+    const sentTo = sent ? maskEmail(email) : undefined;
 
     return {
       ok: true,
       token,
       sentTo,
       message: sentTo
-        ? `Verification code sent to ${sentTo}.`
-        : "Email is not configured yet — use the demo verification code 0000.",
+        ? `A 6-digit code was sent to ${sentTo}. It expires in 5 minutes.`
+        : process.env["RESEND_API_KEY"]
+          ? "Could not send the verification email. Please try resending."
+          : "Email is not configured yet — use the demo verification code 0000.",
     };
   });
 
-/** Step 2 — email verification code (demo fallback: 0000). */
+/** Resend a fresh 6-digit code for an existing (unverified) admin session. */
+export const adminResendCode = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => ({ token: String((input as { token?: string })?.token ?? "") }))
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string; retryInMs?: number }> => {
+    const supabaseAdmin = await adminClient();
+    const { data: session } = await supabaseAdmin
+      .from("admin_sessions")
+      .select("*")
+      .eq("token", data.token)
+      .maybeSingle();
+    if (!session) return { ok: false, message: "Session not found. Start again." };
+    if (session.verified) return { ok: false, message: "This session is already verified." };
+    if (new Date(session.expires_at).getTime() < Date.now())
+      return { ok: false, message: "Session expired. Start again." };
+
+    const sinceLast = Date.now() - new Date(session.created_at).getTime();
+    if (sinceLast < RESEND_COOLDOWN_MS) {
+      const retryInMs = RESEND_COOLDOWN_MS - sinceLast;
+      return { ok: false, retryInMs, message: `Please wait ${Math.ceil(retryInMs / 1000)}s before resending.` };
+    }
+
+    const verification = sixDigitCode();
+    await supabaseAdmin
+      .from("admin_sessions")
+      .update({ verification_code: verification, created_at: new Date().toISOString() })
+      .eq("id", session.id);
+
+    const email = await adminEmail(supabaseAdmin);
+    const sent = await sendVerificationEmail(email, verification);
+    return sent
+      ? { ok: true, message: `A new code was sent to ${maskEmail(email)}. It expires in 5 minutes.` }
+      : { ok: false, message: "Could not send the verification email. Try again shortly." };
+  });
+
+/** Step 2 — email verification code (must be used within 5 minutes of being sent). */
 export const adminVerify = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { token?: string; code?: string };
     return { token: String(v?.token ?? ""), code: String(v?.code ?? "").trim() };
   })
-  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string; expired?: boolean }> => {
     const supabaseAdmin = await adminClient();
     const { data: session } = await supabaseAdmin
       .from("admin_sessions")
@@ -111,15 +176,25 @@ export const adminVerify = createServerFn({ method: "POST" })
     if (new Date(session.expires_at).getTime() < Date.now())
       return { ok: false, message: "Session expired. Start again." };
 
-    const { data: fallbackRow } = await supabaseAdmin
-      .from("app_settings")
-      .select("value")
-      .eq("key", "fallback_verification_code")
-      .maybeSingle();
-    const fallback = fallbackRow?.value || "0000";
+    // Demo fallback is only honoured when no email provider is configured.
+    let fallback: string | null = null;
+    if (!process.env["RESEND_API_KEY"]) {
+      const { data: fallbackRow } = await supabaseAdmin
+        .from("app_settings")
+        .select("value")
+        .eq("key", "fallback_verification_code")
+        .maybeSingle();
+      fallback = fallbackRow?.value || "0000";
+    }
 
-    if (data.code !== session.verification_code && data.code !== fallback) {
-      return { ok: false, message: "Wrong verification code." };
+    const usedFallback = fallback !== null && data.code === fallback;
+    if (!usedFallback) {
+      if (Date.now() - new Date(session.created_at).getTime() > CODE_TTL_MS) {
+        return { ok: false, expired: true, message: "This code has expired. Request a new one." };
+      }
+      if (data.code !== session.verification_code) {
+        return { ok: false, message: "Wrong verification code." };
+      }
     }
     await supabaseAdmin.from("admin_sessions").update({ verified: true }).eq("id", session.id);
     return { ok: true, message: "Welcome to the admin panel." };
