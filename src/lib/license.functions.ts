@@ -142,17 +142,27 @@ export const licenseHeartbeat = createServerFn({ method: "POST" })
       .eq("device_hash", data.deviceHash)
       .maybeSingle();
 
-    if (!device)
-      return {
-        ok: false,
-        reason: "device_mismatch",
-        message: "This device is not registered with this license key. Please contact the developer.",
-      };
-
-    await supabaseAdmin
-      .from("license_devices")
-      .update({ last_seen_at: new Date().toISOString() })
-      .eq("id", device.id);
+    if (!device) {
+      if (license.max_activations <= 0) {
+        // Universal license: any device is allowed until the key is revoked.
+        await supabaseAdmin.from("license_devices").insert({
+          license_id: license.id,
+          device_hash: data.deviceHash,
+          device_name: data.deviceName ?? "",
+        });
+      } else {
+        return {
+          ok: false,
+          reason: "device_mismatch",
+          message: "This device is not registered with this license key. Please contact the developer.",
+        };
+      }
+    } else {
+      await supabaseAdmin
+        .from("license_devices")
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq("id", device.id);
+    }
 
     return {
       ok: true,
